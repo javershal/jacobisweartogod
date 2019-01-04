@@ -19,17 +19,17 @@ var song;
 var noise;
 
 function preload() {
-  noise = loadSound('istg.mp3');
-	song = loadSound('song.mp3');
+  noise = loadSound('sounds/istg.mp3');
+	song = loadSound('sounds/song.mp3');
 }
 
 
 function setup() {
 	song.loop()
 	createCanvas(windowWidth, windowHeight);
-	c_img = loadImage("1512.jpg");
-	p_img = loadImage("nik.png")
-	flyswat = loadImage("flyswatter.png")
+	c_img = loadImage("images/1512.jpg");
+	p_img = loadImage("images/nik.png")
+	flyswat = loadImage("images/flyswatter.png")
 	c_img.resize(windowWidth,windowHeight);
 	image(c_img,0,0)
 	image(p_img,windowWidth/2,windowHeight/2);
