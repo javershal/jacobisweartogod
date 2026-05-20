@@ -1,8 +1,8 @@
 var c_img;
 var p_img;
 var Radius = 100;
-var x_speed = 2.5;
-var y_speed = 2.5
+var x_speed = 4;
+var y_speed = 4;
 var start_x = 0;
 var start_y = 0;
 var start_bx = 25;
@@ -33,6 +33,7 @@ function setup() {
 	c_img.resize(windowWidth,windowHeight);
 	image(c_img,0,0)
 	image(p_img,windowWidth/2,windowHeight/2);
+	image(flyswat,windowWidth/2,windowHeight/2);
 	//image(b_img,windowWidth/1.25, windowHeight/1.2)
 	
 
