@@ -22,6 +22,9 @@ Infrastructure:
   sounds/                # istg.mp3, song.mp3
   P5js/                  # p5.js library files
 
+adamscar/                # Top-down pixel-art lane-dodging car game
+  adamscar.js            # Sprites are pixel maps in code; sounds are synthesized
+  P5js/
 firemansam/              # Fullscreen video player
 itsraining/              # Raindrop animation with sound
   images/                # julianrain.jpg
