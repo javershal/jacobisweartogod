@@ -263,6 +263,7 @@ var pg, sceneryTile, sprites = {};
 var cnv;
 var S = 1, offX = 0, offY = 0;  // scale and offsets are in device pixels
 var lastT = 0;
+var touchUI = window.matchMedia && matchMedia('(pointer: coarse)').matches;  // show tap wording instead of keys
 
 var scrollY = 0;
 var lane = 1, carX = 0;
@@ -291,6 +292,7 @@ function setup() {
   }
   cnv.elt.addEventListener('pointerdown', onPointerDown);
   cnv.elt.addEventListener('pointermove', onPointerMove);
+  cnv.elt.addEventListener('pointerup', onPointerUp);
   layout();
   lastT = millis();
 }
@@ -804,10 +806,14 @@ function drawHUDText() {
     rect(offX, offY, pw, ph);
     shadowText("ADAM'S CAR", cx, offY + ph * 0.3, big, '#d62828', CENTER);
     if (floor(millis() / 500) % 2 === 0) {
-      shadowText('PRESS SPACE TO START', cx, offY + ph * 0.55, small, '#ffffff', CENTER);
+      shadowText(touchUI ? 'TAP TO START' : 'PRESS SPACE TO START', cx, offY + ph * 0.55, small, '#ffffff', CENTER);
     }
-    shadowText('ARROWS TO STEER', cx, offY + ph * 0.65, floor(small * 0.75), '#ffe066', CENTER);
-    shadowText('M TO MUTE', cx, offY + ph * 0.71, floor(small * 0.75), '#ffe066', CENTER);
+    if (touchUI) {
+      shadowText('TAP LEFT / RIGHT TO STEER', cx, offY + ph * 0.65, floor(small * 0.75), '#ffe066', CENTER);
+    } else {
+      shadowText('ARROWS TO STEER', cx, offY + ph * 0.65, floor(small * 0.75), '#ffe066', CENTER);
+      shadowText('M TO MUTE', cx, offY + ph * 0.71, floor(small * 0.75), '#ffe066', CENTER);
+    }
     return;
   }
 
@@ -826,7 +832,7 @@ function drawHUDText() {
     shadowText('GAME OVER', cx, offY + ph * 0.35, floor(big * 0.8), '#d62828', CENTER);
     shadowText('SCORE ' + score, cx, offY + ph * 0.47, small, '#ffffff', CENTER);
     if (millis() - gameOverAt > CONFIG.INPUT_LOCK_MS && floor(millis() / 500) % 2 === 0) {
-      shadowText('PRESS SPACE TO TRY AGAIN', cx, offY + ph * 0.6, small, '#ffffff', CENTER);
+      shadowText(touchUI ? 'TAP TO TRY AGAIN' : 'PRESS SPACE TO TRY AGAIN', cx, offY + ph * 0.6, small, '#ffffff', CENTER);
     }
   }
 }
@@ -885,18 +891,40 @@ function drawMuteButton() {
 }
 
 // Mouse and touch both arrive as pointer events; convert CSS px to canvas px.
-function overMuteButton(e) {
+function canvasPoint(e) {
   var box = cnv.elt.getBoundingClientRect();
-  var px = (e.clientX - box.left) * width / box.width;
-  var py = (e.clientY - box.top) * height / box.height;
-  var r = muteButtonRect(), slop = S * 3;  // a little extra room for fingers
-  return px >= r.x - slop && px <= r.x + r.w + slop && py >= r.y - slop && py <= r.y + r.h + slop;
+  return {
+    x: (e.clientX - box.left) * width / box.width,
+    y: (e.clientY - box.top) * height / box.height
+  };
 }
 
+function overMuteButton(e) {
+  var p = canvasPoint(e);
+  var r = muteButtonRect(), slop = S * 3;  // a little extra room for fingers
+  return p.x >= r.x - slop && p.x <= r.x + r.w + slop && p.y >= r.y - slop && p.y <= r.y + r.h + slop;
+}
+
+// Tap anywhere to start; while playing, tap left or right of the road's
+// center to change lanes.
 function onPointerDown(e) {
-  if (!overMuteButton(e)) return;
-  sfx.toggleMute();
   e.preventDefault();
+  if (e.pointerType === 'touch') touchUI = true;
+  sfx.init();
+  if (overMuteButton(e)) {
+    sfx.toggleMute();
+  } else if (state === PLAYING) {
+    var roadCenter = offX + (roadX + CONFIG.ROAD_W / 2) * S;
+    steer(canvasPoint(e).x < roadCenter ? -1 : 1);
+  } else {
+    startOrRestart();
+  }
+}
+
+// On touch, only pointerup (not pointerdown) counts as a user gesture that
+// lets the browser start audio.
+function onPointerUp() {
+  sfx.init();
 }
 
 function onPointerMove(e) {
@@ -915,20 +943,31 @@ function shadowText(str, x, y, size, col, align) {
 
 // ---------- input / layout ----------
 
+function startOrRestart() {
+  if (state === START) {
+    resetGame();
+  } else if (state === GAMEOVER && millis() - gameOverAt > CONFIG.INPUT_LOCK_MS) {
+    resetGame();
+  }
+}
+
+function steer(dir) {
+  if (state !== PLAYING) return;
+  var next = lane + dir;
+  if (next < 0 || next > 2) return;
+  lane = next;
+  sfx.lane();
+}
+
 function keyPressed() {
+  touchUI = false;
   if (keyCode === 32) {
     sfx.init();
-    if (state === START) {
-      resetGame();
-    } else if (state === GAMEOVER && millis() - gameOverAt > CONFIG.INPUT_LOCK_MS) {
-      resetGame();
-    }
+    startOrRestart();
     return false;
   }
-  if (state === PLAYING) {
-    if (keyCode === LEFT_ARROW && lane > 0) { lane--; sfx.lane(); }
-    if (keyCode === RIGHT_ARROW && lane < 2) { lane++; sfx.lane(); }
-  }
+  if (keyCode === LEFT_ARROW) steer(-1);
+  if (keyCode === RIGHT_ARROW) steer(1);
   if (key === 'M' || key === 'm') sfx.toggleMute();
   if (keyCode === LEFT_ARROW || keyCode === RIGHT_ARROW) return false;
 }
