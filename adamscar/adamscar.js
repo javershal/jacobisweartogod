@@ -23,13 +23,21 @@ var CONFIG = {
   POINTS_PER_LEVEL: 25,
   START_SCORE: 0,           // bump to e.g. 23 to test a level up
   HITBOX_INSET: 2,
-  INPUT_LOCK_MS: 500,
+  INPUT_LOCK_MS: 500,       // after the game over screen shows
+  GAMEOVER_DELAY_MS: 900,   // let the explosion play before the game over screen
   TICK_SOUND: false,
   WHALE_EVERY: [12, 18],    // points between whale spouts (random in range)
   BIGFOOT_EVERY: [38, 52],  // points between bigfoot sightings
   SURF_AMP: 3,              // how far (world px) waves wash up the beach
   SURF_PERIOD: 3.5,         // seconds per wave in-and-out
-  SAND_W: 30                // beach width (world px); narrower on phones to keep some ocean
+  SAND_W: 30,               // beach width (world px); narrower on phones to keep some ocean
+  RAMP_SCORE: 30,           // ramps start showing up at this score
+  RAMP_CHANCE: 0.1,        // chance a row gets a ramp in front of one of its obstacles
+  RAMP_GAP: 2,              // space between the ramp and the obstacle behind it
+  JUMP_MARGIN: 8,           // extra distance past the obstacle before landing
+  JUMP_SCALE: 0.25,         // how much bigger the car looks at the top of a jump
+  JUMP_RISE: 6,             // how far (world px) the car lifts off its shadow at the top
+  JUMP_SHADOW: 2            // how far (world px) the shadow slides right at the top
 };
 
 var W = CONFIG.MIN_W, H = CONFIG.MIN_H;
@@ -70,7 +78,9 @@ var PALETTE = {
   H: '#2c3e50', // whale
   h: '#4a6680', // whale light
   F: '#6b4a2f', // bigfoot fur
-  f: '#c8a27a'  // bigfoot face / hands
+  f: '#c8a27a', // bigfoot face / hands
+  A: '#f4a261', // ramp orange
+  a: '#c4622d'  // ramp dark orange
 };
 
 var SPRITES = {
@@ -93,6 +103,18 @@ var SPRITES = {
     'KKRRRRRRRRKK',
     '.KRRRRRRRRK.',
     '..KKKKKKKK..'
+  ],
+  // high end at the top, chevrons point the way you drive
+  ramp: [
+    'KKKKKKKKKKKKKK',
+    'KwwwwwwwwwwwwK',
+    'KAAAAAKKAAAAAK',
+    'KAAAAKAAKAAAAK',
+    'KAAAKAAAAKAAAK',
+    'KaaaaaKKaaaaaK',
+    'KaaaaKaaKaaaaK',
+    'KaaaKaaaaKaaaK',
+    'KKKKKKKKKKKKKK'
   ],
   ladder: [
     'nN....Nn',
@@ -243,7 +265,12 @@ var SPRITES = {
   ]
 };
 
-var OBSTACLE_TYPES = ['ladder', 'deer', 'chair', 'giraffe', 'elephant', 'sealion'];
+// the car's colors after it blows up
+var BURNT = {
+  K: '#141414', R: '#3b2b2b', r: '#261b1b', V: '#4a4f57', S: '#2b2121', Y: '#6b5a35'
+};
+
+var OBSTACLE_TYPES =['ladder', 'deer', 'chair', 'giraffe', 'elephant', 'sealion'];
 
 var SCENERY = {
   ocean: '#2a6fdb', wave: '#5aa0f0', foam: '#e8f4ff',
@@ -268,9 +295,12 @@ var touchUI = window.matchMedia && matchMedia('(pointer: coarse)').matches;  // 
 var scrollY = 0;
 var lane = 1, carX = 0;
 var obstacles = [];
+var ramps = [];
+var jump = null;   // { d: distance travelled since takeoff, dist: distance until landing }
 var score = 0, level = 0;
 var distSinceRow = 0, nextRowDist = 0, prevFree = null;
 var gameOverAt = 0, shakeT = 0, flashT = 0;
+var boom = null;   // the crash explosion: { x, y, debris, smoke }
 
 // Scenery critters. Both are pinned to the scrolling ground: their screen y is
 // a fixed base plus floor(scrollY), the same way the scenery tile moves.
@@ -290,6 +320,10 @@ function setup() {
   for (var name in SPRITES) {
     sprites[name] = buildSprite(SPRITES[name]);
   }
+  sprites.carShadow = buildSprite(SPRITES.car.map(function (row) {
+    return row.replace(/[^.]/g, 'K');
+  }));
+  sprites.carBurnt = buildSprite(SPRITES.car, BURNT);
   cnv.elt.addEventListener('pointerdown', onPointerDown);
   cnv.elt.addEventListener('pointermove', onPointerMove);
   cnv.elt.addEventListener('pointerup', onPointerUp);
@@ -334,15 +368,16 @@ function layout() {
   bigfoot = null;
 }
 
-function buildSprite(rows) {
+function buildSprite(rows, pal) {
+  pal = pal || PALETTE;
   var h = rows.length, w = rows[0].length;
   var g = createGraphics(w, h);
   g.noStroke();
   for (var y = 0; y < h; y++) {
     for (var x = 0; x < w; x++) {
       var ch = rows[y].charAt(x);
-      if (ch !== '.' && PALETTE[ch]) {
-        g.fill(PALETTE[ch]);
+      if (ch !== '.' && pal[ch]) {
+        g.fill(pal[ch]);
         g.rect(x, y, 1, 1);
       }
     }
@@ -462,9 +497,35 @@ function draw() {
   // road glides smoothly. The car isn't scrolling, so it's drawn on its own.
   var shift = round((scrollY - fs) * S);
   image(pg, sx, sy + shift - S, W * S, (H + 1) * S);
-  var car = sprites.car;
-  image(car.g, sx + round((carX - car.w / 2) * S), sy + carY() * S, car.w * S, car.h * S);
+  drawCar(sx, sy);
+  if (boom) drawBoom(sx, sy);
   drawHUD();
+}
+
+// 0 on the ground, 1 at the top of a jump.
+function jumpLift() {
+  return jump ? sin(PI * min(1, jump.d / jump.dist)) : 0;
+}
+
+// In the air the shadow stays on the road while the car rises off it and grows
+// a little. Car pixels stay whole screen pixels so it stays crisp.
+function drawCar(sx, sy) {
+  var car = sprites.car;
+  var gx = sx + round((carX - car.w / 2) * S), gy = sy + carY() * S;
+  var lift = jumpLift();
+  if (lift <= 0) {
+    if (boom && boomTime() > 0.12) car = sprites.carBurnt;
+    image(car.g, gx, gy, car.w * S, car.h * S);
+    return;
+  }
+  drawingContext.globalAlpha = 0.55;
+  image(sprites.carShadow.g, gx + round(lift * CONFIG.JUMP_SHADOW * S), gy, car.w * S, car.h * S);
+  drawingContext.globalAlpha = 1;
+
+  var P = round(S * (1 + CONFIG.JUMP_SCALE * lift));
+  var cw = car.w * P, chh = car.h * P;
+  var rise = round(lift * CONFIG.JUMP_RISE * S);
+  image(car.g, gx + round((car.w * S - cw) / 2), gy + round((car.h * S - chh) / 2) - rise, cw, chh);
 }
 
 function currentSpeed() {
@@ -482,7 +543,7 @@ function currentDouble() {
 function update(dt) {
   shakeT = max(0, shakeT - dt);
   flashT = max(0, flashT - dt);
-  carX += (laneX(lane) - carX) * min(1, dt * 25);
+  if (state !== GAMEOVER) carX += (laneX(lane) - carX) * min(1, dt * 25);
   updateCritters(dt);
 
   if (state === START) {
@@ -508,7 +569,35 @@ function update(dt) {
     if (o.y > H) obstacles.splice(i, 1);
   }
 
-  checkCollisions();
+  updateJump(move);
+  if (!jump) checkCollisions();
+}
+
+// Driving up a ramp launches the car; it stays up until the obstacle behind
+// the ramp has passed underneath. The jump is measured in distance, not time,
+// so it clears the obstacle at any speed.
+function updateJump(move) {
+  if (jump) {
+    jump.d += move;
+    if (jump.d >= jump.dist) {
+      jump = null;
+      sfx.land();
+    }
+  }
+
+  var car = sprites.car;
+  var top = carY(), bottom = top + car.h;
+  for (var i = ramps.length - 1; i >= 0; i--) {
+    var r = ramps[i];
+    r.y = r.baseY + scrollY;
+    if (!jump && !r.used && r.y >= top && r.y <= top + car.h / 2 + move &&
+        abs(carX - laneX(r.lane)) < 5) {
+      r.used = true;
+      jump = { d: 0, dist: max(1, bottom + CONFIG.JUMP_MARGIN - r.target.y) };
+      sfx.jump();
+    }
+    if (r.y > H) ramps.splice(i, 1);
+  }
 }
 
 function spawnRow() {
@@ -528,13 +617,23 @@ function spawnRow() {
     prevFree = null;
   }
 
-  var tallest = 0;
+  var tallest = 0, row = [];
   for (var i = 0; i < lanes.length; i++) {
     var type = random(OBSTACLE_TYPES);
     var spr = sprites[type];
     var baseY = -spr.h - floor(scrollY);
-    obstacles.push({ type: type, lane: lanes[i], baseY: baseY, y: baseY + scrollY, w: spr.w, h: spr.h, passed: false });
+    var o = { type: type, lane: lanes[i], baseY: baseY, y: baseY + scrollY, w: spr.w, h: spr.h, passed: false };
+    obstacles.push(o);
+    row.push(o);
     tallest = max(tallest, spr.h);
+  }
+
+  // Sometimes put a ramp right in front of one of the obstacles, so you can
+  // either go around it or jump it. Obstacles in a row share a bottom edge.
+  if (score >= CONFIG.RAMP_SCORE && random() < CONFIG.RAMP_CHANCE) {
+    var target = random(row);
+    var rampY = target.baseY + target.h + CONFIG.RAMP_GAP;
+    ramps.push({ lane: target.lane, baseY: rampY, y: rampY + scrollY, target: target, used: false });
   }
 
   distSinceRow = 0;
@@ -742,11 +841,103 @@ function crash() {
   state = GAMEOVER;
   gameOverAt = millis();
   shakeT = 0.3;
+  startBoom();
   sfx.crash();
+}
+
+function gameOverShown() {
+  return state === GAMEOVER && millis() - gameOverAt > CONFIG.GAMEOVER_DELAY_MS;
+}
+
+// ---------- crash explosion ----------
+
+// A few fireballs bloom from the front of the car, car parts fly out and
+// skid to a stop, then smoke drifts off. Everything is in world pixels.
+var BOOM_BLOBS = [[0, 2, 0, 11], [-6, -2, 0.05, 6], [6, 0, 0.08, 7], [-3, 8, 0.1, 6], [5, 8, 0.13, 5]];
+
+function startBoom() {
+  var x = carX, y = carY() + 1;
+  var colors = [PALETTE.R, PALETTE.r, PALETTE.K, PALETTE.Y, PALETTE.V];
+  var debris = [], smoke = [], i;
+  for (i = 0; i < 18; i++) {
+    debris.push({ a: random(TWO_PI), v: random(45, 115), c: random(colors), s: random() < 0.3 ? 2 : 1 });
+  }
+  for (i = 0; i < 7; i++) {
+    smoke.push({ x: x + random(-7, 7), y: y + 4 + random(-6, 6), vx: random(-3, 3), vy: random(-10, -4), d: random(0.3, 0.55) });
+  }
+  boom = { x: x, y: y, debris: debris, smoke: smoke };
+}
+
+function boomTime() {
+  return (millis() - gameOverAt) / 1000;
+}
+
+// distance covered by something launched at speed v that slows to a stop
+function dragged(v, t, k) {
+  return v * (1 - Math.exp(-k * t)) / k;
+}
+
+function pixelDisc(ctx, cx, cy, r, col) {
+  if (r <= 0) return;
+  ctx.fillStyle = col;
+  var ri = ceil(r);
+  for (var dy = -ri; dy <= ri; dy++) {
+    var q = r * r - dy * dy;
+    if (q < 0) continue;
+    var w = floor(sqrt(q));
+    ctx.fillRect(round(cx) - w, round(cy) + dy, 2 * w + 1, 1);
+  }
+}
+
+// The scorch mark sits on the road under the car, so it's drawn with the world.
+function drawScorch() {
+  if (boomTime() < 0.1) return;
+  var ctx = pg.drawingContext;
+  ctx.globalAlpha = 0.35;
+  pixelDisc(ctx, boom.x, boom.y + 6, 10, '#000000');
+  ctx.globalAlpha = 1;
+}
+
+// Drawn on the main canvas over the car, in world pixels scaled by S.
+function drawBoom(sx, sy) {
+  var te = boomTime(), b = boom, i;
+  var ctx = drawingContext;
+  ctx.save();
+  ctx.translate(sx, sy);
+  ctx.scale(S, S);
+
+  for (i = 0; i < b.debris.length; i++) {
+    var d = b.debris[i], dist = dragged(d.v, te, 4.5);
+    ctx.fillStyle = d.c;
+    ctx.fillRect(round(b.x + cos(d.a) * dist), round(b.y + 4 + sin(d.a) * dist), d.s, d.s);
+  }
+
+  for (i = 0; i < BOOM_BLOBS.length; i++) {
+    var bl = BOOM_BLOBS[i];
+    var p = (te - bl[2]) / 0.5;
+    if (p <= 0 || p >= 1) continue;
+    var r = bl[3] * (1 - pow(1 - min(1, p / 0.35), 3)) * (p > 0.75 ? 1 - (p - 0.75) * 2 : 1);
+    var x = b.x + bl[0], y = b.y + bl[1];
+    pixelDisc(ctx, x, y, r, p > 0.6 ? PALETTE.r : PALETTE.R);
+    pixelDisc(ctx, x, y, r * 0.72, '#f77f00');
+    pixelDisc(ctx, x, y, r * 0.45 * (1 - p), PALETTE.Y);
+    if (p < 0.2) pixelDisc(ctx, x, y, r * 0.3, '#ffffff');
+  }
+
+  for (i = 0; i < b.smoke.length; i++) {
+    var s = b.smoke[i], age = te - s.d;
+    if (age <= 0 || age > 2.2) continue;
+    ctx.globalAlpha = age > 1.4 ? 0.3 : (age > 0.8 ? 0.55 : 0.8);
+    pixelDisc(ctx, s.x + s.vx * age, s.y + s.vy * age, 2 + min(4, age * 4), '#565b66');
+  }
+  ctx.restore();
 }
 
 function resetGame() {
   obstacles = [];
+  ramps = [];
+  jump = null;
+  boom = null;
   score = CONFIG.START_SCORE;
   level = floor(score / CONFIG.POINTS_PER_LEVEL);
   lane = 1;
@@ -774,8 +965,13 @@ function renderWorld(fs) {
   drawSurf(off);
   if (whale) drawWhale();
   if (bigfoot) drawBigfoot();
+  if (boom) drawScorch();
 
-  for (var i = 0; i < obstacles.length; i++) {
+  var i;
+  for (i = 0; i < ramps.length; i++) {
+    drawSprite(sprites.ramp, laneX(ramps[i].lane), ramps[i].baseY + fs);
+  }
+  for (i = 0; i < obstacles.length; i++) {
     var o = obstacles[i];
     drawSprite(sprites[o.type], laneX(o.lane), o.baseY + fs);
   }
@@ -826,12 +1022,14 @@ function drawHUDText() {
     shadowText('SPEED UP!', cx, offY + ph * 0.4, small, '#ffe066', CENTER);
   }
 
-  if (state === GAMEOVER) {
-    fill(0, 0, 0, 150);
+  if (gameOverShown()) {
+    var shownFor = millis() - gameOverAt - CONFIG.GAMEOVER_DELAY_MS;
+    fill(0, 0, 0, 150 * min(1, shownFor / 250));  // quick fade in over the wreck
     rect(offX, offY, pw, ph);
+    if (shownFor < 250) return;
     shadowText('GAME OVER', cx, offY + ph * 0.35, floor(big * 0.8), '#d62828', CENTER);
     shadowText('SCORE ' + score, cx, offY + ph * 0.47, small, '#ffffff', CENTER);
-    if (millis() - gameOverAt > CONFIG.INPUT_LOCK_MS && floor(millis() / 500) % 2 === 0) {
+    if (shownFor > CONFIG.INPUT_LOCK_MS && floor(millis() / 500) % 2 === 0) {
       shadowText(touchUI ? 'TAP TO TRY AGAIN' : 'PRESS SPACE TO TRY AGAIN', cx, offY + ph * 0.6, small, '#ffffff', CENTER);
     }
   }
@@ -946,7 +1144,7 @@ function shadowText(str, x, y, size, col, align) {
 function startOrRestart() {
   if (state === START) {
     resetGame();
-  } else if (state === GAMEOVER && millis() - gameOverAt > CONFIG.INPUT_LOCK_MS) {
+  } else if (state === GAMEOVER && millis() - gameOverAt > CONFIG.GAMEOVER_DELAY_MS + CONFIG.INPUT_LOCK_MS) {
     resetGame();
   }
 }
@@ -1038,6 +1236,11 @@ var sfx = {
     this.tone(523, 0.09, 'square', 0.08, 0, 0);
     this.tone(659, 0.09, 'square', 0.08, 0, 0.09);
     this.tone(784, 0.16, 'square', 0.08, 0, 0.18);
+  },
+  jump: function () { this.tone(330, 0.18, 'square', 0.06, 880); },
+  land: function () {
+    this.noise(0.08, 0.12);
+    this.tone(140, 0.08, 'square', 0.06, 70);
   },
   crash: function () {
     this.noise(0.35, 0.25);
